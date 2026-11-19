@@ -114,6 +114,10 @@ Lighting, remaps and macros already written to the keyboard stay on it.
   at any time.
 * **Macros** (USB-C): text the keyboard types by itself, even without the app.
 * **Power:** sleep timeout, including Never.
+* **Settings:** configure Win key Lock, sleep, debounce (0–8 ms), brightness
+  (0–9), and OS mode (Linux, Android, or Mac). **Factory reset** is shown only
+  when the keyboard is online over the 2.4 GHz receiver. It asks for confirmation
+  and does not delete local profiles.
 * **Background:** close the window and live effects keep running; the tray icon
   has profiles, effects and Quit.
 
