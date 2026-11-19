@@ -15,6 +15,7 @@ They are stored on the keyboard and stay active over Bluetooth.";
 
 pub struct F75 {
     dev: Option<HidDevice>, // None = dry run
+    simulated_side_light: p::SideLightMode,
     pub link: Link,
     pub cmds: Cmds,
     pub log: Vec<String>,
@@ -52,11 +53,27 @@ impl F75 {
         let dev = api
             .open_path(&std::ffi::CString::new(path.clone())?)
             .with_context(|| format!("cannot open {path} ({}) - click Fix permissions in the app or run `f75-studio fix-permissions`", link.name()))?;
-        Ok(Self { dev: Some(dev), link, cmds: p::cmds(link), log: vec![format!("{} via {path}", link.name())], path, trace: None })
+        Ok(Self {
+            dev: Some(dev),
+            simulated_side_light: p::SideLightMode::Off,
+            link,
+            cmds: p::cmds(link),
+            log: vec![format!("{} via {path}", link.name())],
+            path,
+            trace: None,
+        })
     }
 
     pub fn dry_run(link: Link) -> Self {
-        Self { dev: None, link, cmds: p::cmds(link), log: vec![format!("dry run ({})", link.name())], path: String::new(), trace: None }
+        Self {
+            dev: None,
+            simulated_side_light: p::SideLightMode::Off,
+            link,
+            cmds: p::cmds(link),
+            log: vec![format!("dry run ({})", link.name())],
+            path: String::new(),
+            trace: None,
+        }
     }
 
     pub fn dry(&self) -> bool {
@@ -270,13 +287,16 @@ impl F75 {
         if self.link != Link::Receiver {
             return Ok(true);
         }
-        Ok(self.wireless_read(p::WIRELESS_ONLINE, 0, 1)?[0] != 0)
+        let reply = self.wireless_read(p::WIRELESS_ONLINE, 0, 1)?;
+        Ok(self.dry() || reply[0] != 0)
     }
 
     pub fn get_led_block(&mut self) -> Result<Vec<u8>> {
         let led = self.cmds.led;
-        let b = self.read(led, 0, p::LED_BLOCK_LEN)?;
-        if !self.dry() && !p::led_block_valid(&b) {
+        let mut b = self.read(led, 0, p::LED_BLOCK_LEN)?;
+        if self.dry() {
+            p::edit_side_light(&mut b, self.simulated_side_light);
+        } else if !p::led_block_valid(&b) {
             bail!("LED block signature 5A A5 missing - refusing to write");
         }
         Ok(b)
@@ -292,6 +312,14 @@ impl F75 {
 
     pub fn set_effect(&mut self, mode: u8, brightness: u8, speed: u8, colour: u8) -> Result<()> {
         self.edit_block(|b| p::edit_led_block(b, mode, brightness, speed, colour))
+    }
+
+    pub fn set_side_light(&mut self, mode: p::SideLightMode) -> Result<()> {
+        self.edit_block(|b| p::edit_side_light(b, mode))?;
+        if self.dry() {
+            self.simulated_side_light = mode;
+        }
+        Ok(())
     }
 
     /// Seconds from protocol::SLEEP (0 = never).
@@ -346,4 +374,29 @@ impl F75 {
 
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulated_side_light_round_trips_over_both_links() -> Result<()> {
+        for link in [Link::Wired, Link::Receiver] {
+            let mut keyboard = F75::dry_run(link);
+            assert!(keyboard.online()?);
+            assert_eq!(
+                p::side_light_from_block(&keyboard.get_led_block()?),
+                Some(0)
+            );
+            for mode in p::SideLightMode::ALL {
+                keyboard.set_side_light(mode)?;
+                assert_eq!(
+                    p::side_light_from_block(&keyboard.get_led_block()?),
+                    Some(mode as u8)
+                );
+            }
+        }
+        Ok(())
+    }
 }

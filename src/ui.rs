@@ -63,6 +63,8 @@ pub struct App {
     pending: bool,
     link: Option<Link>,
     online: bool,
+    side_light: Option<u8>,
+    side_light_pending: bool,
     selected: Option<usize>,
     painting: bool,
     layer: u8,
@@ -106,6 +108,8 @@ impl App {
             pending: false,
             link,
             online: link.is_some(),
+            side_light: None,
+            side_light_pending: false,
             selected: None,
             painting: false,
             layer: 0,
@@ -250,7 +254,8 @@ impl App {
                 Event::Connected(l) => {
                     self.link = Some(l);
                     self.perm_issue = false;
-                    self.online = true;
+                    self.online = false;
+                    self.side_light = None;
                     if l != Link::Wired && self.lv.streaming() {
                         self.lv.fx = None;
                         self.lv.audio = false;
@@ -265,12 +270,23 @@ impl App {
                         self.toasts.warning("Keyboard disconnected");
                     }
                     self.link = None;
+                    self.side_light = None;
                 }
                 Event::Online(o) => {
                     if self.online && !o {
                         self.toasts.info("Keyboard asleep - press a key to wake it");
                     }
                     self.online = o;
+                    if !o {
+                        self.side_light = None;
+                    }
+                }
+                Event::SideLightRead(value) => self.side_light = Some(value),
+                Event::SideLightSaved(mode) => {
+                    self.side_light_pending = false;
+                    if let Some(mode) = mode {
+                        self.side_light = Some(mode as u8);
+                    }
                 }
                 Event::Block { mode, brightness, speed, colour, sleep } => {
                     self.mode = mode;
@@ -761,6 +777,7 @@ impl App {
         }
         ui.add_space(10.0);
         section(ui, "BUILT-IN EFFECTS · RUN ON THE KEYBOARD");
+        self.side_light_picker(ui);
         if hw == p::CUSTOM_MODE {
             section(ui, "BRUSH");
             ui.horizontal_wrapped(|ui| {
@@ -836,6 +853,36 @@ impl App {
                     ui.end_row();
                 }
             }
+        });
+    }
+
+    fn side_light_picker(&mut self, ui: &mut Ui) {
+        let enabled = matches!(self.link, Some(Link::Wired | Link::Receiver))
+            && self.online
+            && !self.busy
+            && !self.side_light_pending;
+        let active = self.side_light.and_then(p::SideLightMode::from_byte);
+        let label = match (self.side_light, active) {
+            (_, Some(mode)) => mode.label(),
+            (Some(_), None) => "Unknown",
+            (None, None) => "Unavailable",
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Side light:");
+            ui.add_enabled_ui(enabled, |ui| {
+                egui::ComboBox::from_id_salt("side-light")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for mode in p::SideLightMode::ALL {
+                            let selected = active == Some(mode);
+                            if ui.selectable_label(selected, mode.label()).clicked() && !selected {
+                                self.side_light_pending = true;
+                                self.core.send(Job::SetSideLight(mode));
+                            }
+                        }
+                    });
+            });
         });
     }
 

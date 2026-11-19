@@ -177,7 +177,44 @@ pub const RANDOM_COLOUR: u8 = 7;
 /// KB.ini SleepUI / SleepHW (seconds -> hardware value); 0 disables sleep.
 pub const SLEEP: &[(u16, u8)] =
     &[(0, 0), (60, 2), (90, 3), (120, 4), (180, 6), (240, 8), (300, 10), (600, 20), (900, 30), (1200, 40)];
+pub const SIDE_LIGHT_OFFSET: usize = 0x12;
 pub const SLEEP_OFFSET: usize = 0x18;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SideLightMode {
+    Off = 0,
+    Fill = 1,
+    Breathing = 2,
+    Static = 3,
+}
+
+impl SideLightMode {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Fill, Self::Breathing, Self::Static];
+
+    pub fn from_byte(value: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(value)).copied()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Fill => "Fill",
+            Self::Breathing => "Breathing",
+            Self::Static => "Static",
+        }
+    }
+}
+
+/// Keep an unknown firmware value distinct from a missing field.
+pub fn side_light_from_block(b: &[u8]) -> Option<u8> {
+    b.get(SIDE_LIGHT_OFFSET).copied()
+}
+
+/// Edit a complete LED settings block without touching other settings.
+pub fn edit_side_light(b: &mut [u8], mode: SideLightMode) {
+    b[SIDE_LIGHT_OFFSET] = mode as u8;
+}
 
 pub fn led_block_valid(b: &[u8]) -> bool {
     b.len() >= LED_BLOCK_LEN && b[126] == 0x5a && b[127] == 0xa5
@@ -356,6 +393,49 @@ pub fn keymap_encoding_ok(layer0: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn side_light_mode_decoding() {
+        for (value, mode) in [
+            (0, SideLightMode::Off),
+            (1, SideLightMode::Fill),
+            (2, SideLightMode::Breathing),
+            (3, SideLightMode::Static),
+        ] {
+            assert_eq!(SideLightMode::from_byte(value), Some(mode));
+            assert_eq!(mode as u8, value);
+        }
+        assert_eq!(SideLightMode::from_byte(4), None);
+        assert_eq!(SideLightMode::from_byte(255), None);
+        assert_eq!(side_light_from_block(&[0; SIDE_LIGHT_OFFSET]), None);
+
+        let mut block = [0; LED_BLOCK_LEN];
+        block[SIDE_LIGHT_OFFSET] = 255;
+        assert_eq!(side_light_from_block(&block), Some(255));
+    }
+
+    #[test]
+    fn side_light_edit_preserves_other_settings() {
+        let mut original = [0x42; LED_BLOCK_LEN];
+        original[10] = 1;
+        original[SLEEP_OFFSET] = 10;
+        original[126..].copy_from_slice(&[0x5a, 0xa5]);
+
+        for mode in SideLightMode::ALL {
+            let mut block = original;
+            edit_side_light(&mut block, mode);
+            assert_eq!(side_light_from_block(&block), Some(mode as u8));
+            assert_eq!(block[..SIDE_LIGHT_OFFSET], original[..SIDE_LIGHT_OFFSET]);
+            assert_eq!(
+                block[SIDE_LIGHT_OFFSET + 1..],
+                original[SIDE_LIGHT_OFFSET + 1..]
+            );
+            assert!(led_block_valid(&block));
+
+            edit_led_block(&mut block, CUSTOM_MODE, 9, 1, 7);
+            assert_eq!(side_light_from_block(&block), Some(mode as u8));
+        }
+    }
 
     #[test]
     fn checksum_is_byte_sum() {
