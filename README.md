@@ -105,6 +105,10 @@ Lighting, remaps and macros already written to the keyboard stay on it.
   the tray. A profile holds lighting, sleep, both key layers and macros.
 * **Lighting:** paint keys by clicking or dragging, presets, and 18 hardware
   effects with brightness, speed and colour.
+* **Side light:** set the keyboard's light bar to Off, Fill, Breathing or Static
+  from the Lighting tab, independently of profiles and per-key RGB. Available
+  over USB-C and 2.4 GHz in the app; both still need hardware verification.
+  Not configurable over Bluetooth.
 * **Studio FX** (USB-C): Wave, Breathe, Twinkle, Plasma, Matrix Rain and Fire at
   about 50 fps, with 8 palettes.
 * **Audio sync** (USB-C): Spectrum and Mirror, driven by whatever is playing.

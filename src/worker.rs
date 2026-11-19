@@ -175,6 +175,7 @@ pub enum Job {
     Effect { mode: u8, brightness: u8, speed: u8, colour: u8 },
     PerKey { colours: Box<Colours>, brightness: u8 },
     Sleep(u16),
+    SetSideLight(p::SideLightMode),
     Frame(Box<Colours>),
     LoadKeymap(u8),
     Remap { layer: u8, led: u8, code: [u8; 4] },
@@ -189,6 +190,8 @@ pub enum Event {
     Connected(Link),
     Lost(String),
     Online(bool),
+    SideLightRead(u8),
+    SideLightSaved(Option<p::SideLightMode>),
     Block { mode: usize, brightness: u8, speed: u8, colour: u8, sleep: u16 },
     Keymap { layer: u8, codes: Vec<[u8; 4]>, backup: Vec<[u8; 4]> },
     Done(String),
@@ -198,6 +201,7 @@ pub enum Event {
 struct Worker {
     core: Arc<Core>,
     last_online: std::time::Instant,
+    online: Option<bool>,
     kb: Option<F75>,
     keymaps: HashMap<u8, Vec<u8>>,
     backups: HashMap<u8, Vec<u8>>,
@@ -225,23 +229,45 @@ impl Worker {
             self.keymaps.clear();
             self.backups.clear();
             self.held = false;
-            // while streaming, the stored brightness is the held 9, not the user's setting
-            let streaming = self.core.live.lock().unwrap().streaming();
-            if let Ok(online) = kb.online() {
+            self.online = kb.online().ok();
+            if let Some(online) = self.online {
+                self.last_online = Instant::now();
                 let _ = self.tx.send(Event::Online(online));
-                if online && !kb.dry() && !streaming {
-                    if let Ok(b) = kb.get_led_block() {
-                        if let Some((mode, brightness, speed, colour)) = p::effect_from_block(&b) {
-                            let hw = b[p::SLEEP_OFFSET];
-                            let sleep = p::SLEEP.iter().find(|s| s.1 == hw).map(|s| s.0).unwrap_or(300);
-                            let _ = self.tx.send(Event::Block { mode, brightness, speed, colour, sleep });
-                        }
-                    }
+                if online {
+                    // While streaming, the firmware brightness is held at 9.
+                    let streaming = self.core.live.lock().unwrap().streaming();
+                    Self::sync_led_block(&mut kb, &self.tx, !streaming);
                 }
             }
             self.kb = Some(kb);
         }
         Ok(self.kb.as_mut().unwrap())
+    }
+
+    fn sync_led_block(kb: &mut F75, tx: &Sender<Event>, include_effect: bool) {
+        if kb.link == Link::Bluetooth {
+            return;
+        }
+        let Ok(block) = kb.get_led_block() else {
+            return;
+        };
+        if let Some(value) = p::side_light_from_block(&block) {
+            let _ = tx.send(Event::SideLightRead(value));
+        }
+        if include_effect
+            && !kb.dry()
+            && let Some((mode, brightness, speed, colour)) = p::effect_from_block(&block)
+        {
+            let hw = block[p::SLEEP_OFFSET];
+            let sleep = p::SLEEP.iter().find(|s| s.1 == hw).map_or(300, |s| s.0);
+            let _ = tx.send(Event::Block {
+                mode,
+                brightness,
+                speed,
+                colour,
+                sleep,
+            });
+        }
     }
 
     fn keymap(&mut self, layer: u8) -> anyhow::Result<Vec<u8>> {
@@ -285,13 +311,18 @@ impl Worker {
                     }
                 }
                 // radio traffic can swallow key releases on 2.4G (auto-repeat), so ask rarely
-                let fresh = self.kb.is_none();
-                let due = self.last_online.elapsed() > std::time::Duration::from_secs(20);
-                let kb = self.ensure()?;
-                if fresh || due {
+                self.ensure()?;
+                let due = self.last_online.elapsed() > Duration::from_secs(20);
+                if (self.online.is_none() || due)
+                    && let Some(kb) = self.kb.as_mut()
+                {
                     let online = kb.online()?;
-                    self.last_online = std::time::Instant::now();
+                    self.last_online = Instant::now();
                     let _ = self.tx.send(Event::Online(online));
+                    if online && self.online != Some(true) {
+                        Self::sync_led_block(kb, &self.tx, false);
+                    }
+                    self.online = Some(online);
                 }
                 None
             }
@@ -308,6 +339,10 @@ impl Worker {
             Job::Sleep(s) => {
                 self.ensure()?.set_sleep(s)?;
                 Some(if s == 0 { "Sleep disabled - lights stay on".into() } else { format!("Sleep after {}", sleep_label(s)) })
+            }
+            Job::SetSideLight(mode) => {
+                self.ensure()?.set_side_light(mode)?;
+                None
             }
             Job::Frame(c) => {
                 // studio FX, audio sync and LIVE painting: dimmed here by the brightness setting
@@ -437,10 +472,20 @@ impl Worker {
     /// Runs a job; a failure only counts as "disconnected" if the device node is really gone.
     fn handle(&mut self, job: Job) -> Option<Event> {
         let was_connected = self.kb.is_some();
+        let side_light = match &job {
+            Job::SetSideLight(mode) => Some(*mode),
+            _ => None,
+        };
         match self.run(job) {
+            Ok(_) if side_light.is_some() => Some(Event::SideLightSaved(side_light)),
             Ok(Some(m)) => Some(Event::Done(m)),
             Ok(None) => Some(Event::Done(String::new())),
-            Err(e) => Some(self.fail(e, was_connected)),
+            Err(e) => {
+                if side_light.is_some() {
+                    let _ = self.tx.send(Event::SideLightSaved(None));
+                }
+                Some(self.fail(e, was_connected))
+            }
         }
     }
 
@@ -461,6 +506,7 @@ fn worker(rx: Receiver<Job>, tx: Sender<Event>, core: Arc<Core>) {
     let mut w = Worker {
         core: core.clone(),
         last_online: Instant::now(),
+        online: None,
         kb: None,
         keymaps: HashMap::new(),
         backups: HashMap::new(),
