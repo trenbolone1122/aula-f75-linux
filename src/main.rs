@@ -9,6 +9,7 @@ mod layout;
 mod macros;
 mod perms;
 mod protocol;
+mod settings;
 mod state;
 mod tray;
 mod ui;

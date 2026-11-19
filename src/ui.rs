@@ -4,6 +4,7 @@ use crate::kbview;
 use crate::layout::{CANVAS, KEYS};
 use crate::macros;
 use crate::protocol::{self as p, Link, EFFECTS, LED_COUNT, PALETTE, RANDOM_COLOUR};
+use crate::settings::{self, Change};
 use crate::state::{MacroDef, Profile};
 use crate::worker::{fx_by_name, macro_buffer, mode_index, sleep_label, Colours, Core, Event, Job, Live};
 use std::sync::atomic::Ordering;
@@ -40,6 +41,7 @@ enum Tab {
     Macros,
     Audio,
     Power,
+    Settings,
 }
 
 pub struct App {
@@ -63,6 +65,10 @@ pub struct App {
     pending: bool,
     link: Option<Link>,
     online: bool,
+    setting_pending: bool,
+    debounce_draft: Option<u8>,
+    brightness_draft: Option<u8>,
+    reset_confirmation: Option<u64>,
     selected: Option<usize>,
     painting: bool,
     layer: u8,
@@ -106,6 +112,10 @@ impl App {
             pending: false,
             link,
             online: link.is_some(),
+            setting_pending: false,
+            debounce_draft: None,
+            brightness_draft: None,
+            reset_confirmation: None,
             selected: None,
             painting: false,
             layer: 0,
@@ -267,17 +277,60 @@ impl App {
                     self.link = None;
                 }
                 Event::Online(o) => {
+                    if !o {
+                        self.debounce_draft = None;
+                        self.brightness_draft = None;
+                        self.reset_confirmation = None;
+                    }
                     if self.online && !o {
                         self.toasts.info("Keyboard asleep - press a key to wake it");
                     }
                     self.online = o;
                 }
-                Event::Block { mode, brightness, speed, colour, sleep } => {
+                Event::Block {
+                    mode,
+                    brightness,
+                    speed,
+                    colour,
+                } => {
                     self.mode = mode;
+                    self.s.mode = EFFECTS[mode].0;
                     self.s.brightness = brightness;
                     self.s.speed = speed;
                     self.s.colour = colour;
-                    self.s.sleep = sleep;
+                }
+                Event::SettingFinished(change) => {
+                    self.setting_pending = false;
+                    match change {
+                        Some(Change::Sleep(seconds)) => {
+                            self.s.sleep = seconds;
+                            self.s.save();
+                        }
+                        Some(Change::Brightness(value)) => {
+                            self.s.brightness = value;
+                            self.s.save();
+                        }
+                        _ => {}
+                    }
+                }
+                Event::ResetFinished(result) => {
+                    self.setting_pending = false;
+                    match result {
+                        Ok(()) => {
+                            self.link = None;
+                            self.online = false;
+                            self.pending = false;
+                            self.busy = false;
+                            self.lv.fx = None;
+                            self.lv.audio = false;
+                            self.keymaps.clear();
+                            self.toasts
+                                .info("Reset sent - waiting for the keyboard to reconnect");
+                        }
+                        Err(error) => {
+                            self.toasts.error(error);
+                        }
+                    }
                 }
                 Event::Keymap { layer, codes, backup } => {
                     // the profile keeps its own layout (macro keys are re-derived from its macros)
@@ -367,6 +420,7 @@ impl eframe::App for App {
                 Tab::Macros => self.macros(ui),
                 Tab::Audio => self.audio_tab(ui),
                 Tab::Power => self.power(ui),
+                Tab::Settings => self.settings_panel(ui),
             });
         });
         egui::CentralPanel::no_frame()
@@ -441,6 +495,7 @@ impl App {
                 (Tab::Macros, icon::LIGHTNING, "MACROS"),
                 (Tab::Audio, icon::WAVEFORM, "AUDIO"),
                 (Tab::Power, icon::MOON, "POWER"),
+                (Tab::Settings, icon::GEAR, "SETTINGS"),
             ] {
                 let on = self.tab == tab;
                 let (r, resp) = ui.allocate_exact_size(vec2(72.0, 64.0), Sense::click());
@@ -483,7 +538,7 @@ impl App {
             Tab::Keys => "Select a key, then pick what it should do",
             Tab::Macros => "Select a key to assign the macro",
             Tab::Audio => "Live audio visualizer",
-            Tab::Power => "Lighting preview",
+            Tab::Power | Tab::Settings => "Lighting preview",
         };
         ui.horizontal(|ui| {
             ui.label(RichText::new(match self.tab {
@@ -494,6 +549,7 @@ impl App {
                 Tab::Macros => "MACROS",
                 Tab::Audio => "AUDIO SYNC",
                 Tab::Power => "POWER",
+                Tab::Settings => "SETTINGS",
             }).family(display()).size(17.0).color(ACC));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 for (on, label) in [(true, "3D"), (false, "2D")] {
@@ -690,10 +746,11 @@ impl App {
             EFFECTS[self.mode].1
         };
         let sel = self.selected.filter(|_| matches!(self.tab, Tab::Keys | Tab::Macros)).map(key_name);
+        let sleep = self.core.settings.lock().unwrap().and_then(|settings| settings.sleep);
         let cards = [
             (icon::LIGHTBULB, "EFFECT", effect.to_string()),
             (icon::GAUGE, "BRIGHTNESS", format!("{} / 9", self.s.brightness)),
-            (icon::MOON, "SLEEP", sleep_label(self.s.sleep)),
+            (icon::MOON, "SLEEP", sleep.map_or_else(|| "Unavailable".into(), sleep_label)),
             match sel {
                 Some(k) => (icon::KEYBOARD, "SELECTED KEY", k),
                 None => (self.link.map(link_icon).unwrap_or(icon::PLUGS), "CONNECTION", self.link.map(|l| l.name().to_string()).unwrap_or("Offline".into())),
@@ -796,10 +853,7 @@ impl App {
         }
         if has_light {
             section(ui, "BRIGHTNESS");
-            let r = ui.add(egui::Slider::new(&mut self.s.brightness, 0..=9).show_value(true));
-            if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                self.apply();
-            }
+            self.brightness_slider(ui);
         }
         if has_speed {
             section(ui, "SPEED");
@@ -1072,30 +1126,176 @@ impl App {
         }
     }
 
+    fn settings_available(&self) -> bool {
+        matches!(self.link, Some(Link::Wired | Link::Receiver))
+            && self.online
+            && !self.setting_pending
+            && !self.busy
+    }
+
+    fn change_setting(&mut self, change: Change) {
+        if self.settings_available() {
+            self.setting_pending = true;
+            self.core.send(Job::SetSetting(change));
+        }
+    }
+
+    fn brightness_slider(&mut self, ui: &mut Ui) {
+        let streaming = self.streaming();
+        let current = if streaming {
+            Some(self.s.brightness)
+        } else {
+            self.core
+                .settings
+                .lock()
+                .unwrap()
+                .and_then(|s| s.brightness)
+        };
+        if let Some(current) = current {
+            if let Some(value) = setting_slider(ui, current, &mut self.brightness_draft, 9) {
+                if streaming {
+                    self.s.brightness = value;
+                    self.apply();
+                } else {
+                    self.change_setting(Change::Brightness(value));
+                }
+            }
+        } else {
+            self.brightness_draft = None;
+            ui.label(RichText::new("Unavailable for the current effect").color(DIM));
+        }
+    }
+
+    fn settings_panel(&mut self, ui: &mut Ui) {
+        heading(ui, "SETTINGS", "Keyboard settings");
+        let settings = self.core.settings.lock().unwrap().unwrap_or_default();
+        let enabled = self.settings_available();
+        ui.add_enabled_ui(enabled, |ui| {
+            if let Some(mut locked) = settings.win_lock {
+                if ui.checkbox(&mut locked, "Win key Lock").changed() {
+                    self.change_setting(Change::WinLock(locked));
+                }
+            } else {
+                ui.label(RichText::new("Win key Lock: unavailable").color(DIM));
+            }
+
+            section(ui, "SLEEP");
+            let mut sleep = settings.sleep;
+            egui::ComboBox::from_id_salt("settings_sleep")
+                .selected_text(sleep.map_or_else(|| "Unavailable".into(), sleep_label))
+                .show_ui(ui, |ui| {
+                    for &(seconds, _) in p::SLEEP {
+                        ui.selectable_value(&mut sleep, Some(seconds), sleep_label(seconds));
+                    }
+                });
+            if let Some(seconds) = sleep.filter(|seconds| Some(*seconds) != settings.sleep) {
+                self.change_setting(Change::Sleep(seconds));
+            }
+            ui.label(RichText::new("Wireless only. Never uses more battery.").color(DIM));
+
+            section(ui, "DEBOUNCE (MS)");
+            if let Some(ms) = settings.debounce {
+                if let Some(value) =
+                    setting_slider(ui, ms, &mut self.debounce_draft, settings::MAX_DEBOUNCE_MS)
+                {
+                    self.change_setting(Change::Debounce(value));
+                }
+            } else {
+                ui.label("Unavailable");
+            }
+
+            section(ui, "BRIGHTNESS");
+            self.brightness_slider(ui);
+
+            section(ui, "OS MODE");
+            let mut os = settings.os_mode;
+            egui::ComboBox::from_id_salt("settings_os")
+                .selected_text(
+                    os.map_or("Unavailable", |mode| settings::OS_MODES[usize::from(mode)]),
+                )
+                .show_ui(ui, |ui| {
+                    for (mode, name) in settings::OS_MODES.into_iter().enumerate() {
+                        ui.selectable_value(&mut os, Some(mode as u8), name);
+                    }
+                });
+            if let Some(mode) = os.filter(|mode| Some(*mode) != settings.os_mode) {
+                self.change_setting(Change::OsMode(mode));
+            }
+        });
+
+        let session = (*self.core.reset_session.lock().unwrap())
+            .filter(|_| settings::reset_allowed(self.link, self.online));
+        if self.reset_confirmation != session {
+            self.reset_confirmation = None;
+        }
+        if let Some(session) = session {
+            ui.add_space(10.0);
+            if ui
+                .add_enabled(enabled, egui::Button::new("Factory reset"))
+                .clicked()
+            {
+                self.reset_confirmation = Some(session);
+            }
+            if self.reset_confirmation == Some(session) {
+                let modal = egui::Modal::new(ui.id().with("factory_reset")).show(ui.ctx(), |ui| {
+                    ui.heading("Reset keyboard to factory settings?");
+                    ui.label("Settings stored on the keyboard may be lost. The keyboard may restart or need pairing again. Local profiles will not be deleted.");
+                    ui.horizontal(|ui| {
+                        let cancel = ui.button("Cancel").clicked();
+                        let confirm = ui.add_enabled(enabled, egui::Button::new("Reset keyboard")).clicked();
+                        (cancel, confirm)
+                    }).inner
+                });
+                if modal.inner.0 || modal.should_close() {
+                    self.reset_confirmation = None;
+                } else if modal.inner.1 {
+                    self.reset_confirmation = None;
+                    self.setting_pending = true;
+                    self.pending = false;
+                    self.core.send(Job::FactoryReset(session));
+                }
+            }
+        }
+    }
+
     fn power(&mut self, ui: &mut Ui) {
         heading(ui, "POWER", "Sleep");
         ui.label(RichText::new("In wireless mode the keyboard turns its lights off after this much idle time.").color(DIM));
         section(ui, "SLEEP AFTER");
         let mut pick = None;
-        egui::Grid::new("sleep").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
+        let current = self.core.settings.lock().unwrap().and_then(|s| s.sleep);
+        ui.add_enabled_ui(self.settings_available(), |ui| egui::Grid::new("sleep").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
             for (i, (secs, _)) in p::SLEEP.iter().enumerate() {
                 let label = if *secs == 0 { "Never (always on)".to_string() } else { sleep_label(*secs) };
-                if tile(ui, &label, self.s.sleep == *secs, [162.0, 36.0]) {
+                if tile(ui, &label, current == Some(*secs), [162.0, 36.0]) {
                     pick = Some(*secs);
                 }
                 if i % 2 == 1 {
                     ui.end_row();
                 }
             }
-        });
-        if let Some(s) = pick {
-            self.s.sleep = s;
-            self.s.save();
-            self.send(Job::Sleep(s));
+        }));
+        if let Some(s) = pick.filter(|seconds| Some(*seconds) != current) {
+            self.change_setting(Change::Sleep(s));
         }
         ui.add_space(10.0);
         ui.label(RichText::new(format!("{} Always-on drains the battery faster. The cable never sleeps.", icon::INFO)).size(12.0).color(DIM));
     }
+}
+
+fn setting_slider(ui: &mut Ui, current: u8, draft: &mut Option<u8>, max: u8) -> Option<u8> {
+    let mut value = draft.unwrap_or(current);
+    let response = ui.add(egui::Slider::new(&mut value, 0..=max));
+    if response.dragged() {
+        *draft = Some(value);
+        return None;
+    }
+    if response.drag_stopped() || response.changed() {
+        *draft = None;
+        return (value != current).then_some(value);
+    }
+    *draft = None;
+    None
 }
 
 // ------------------------------------------------------------------ widgets

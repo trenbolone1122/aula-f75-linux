@@ -70,7 +70,7 @@ Repeated indices are ignored; reading stops at `index + 1 == total`.
 | `0x02` | `0x42` | +0x68 / +0x6c | Per-key LED matrix, sub = colour group (vendor log text: "SetGame") |
 | `0x03` | `0x43` | +0x58 / +0x5c | Macro data |
 | `0x04` | `0x44` | +0x60 / +0x64 | LED settings block (128 bytes) |
-| `0x06` | - | +0x80 | Reset device (no ack) |
+| `0x06` | - | +0x80 | Factory reset: sub `0`, payload `[1]`, send once; no ACK |
 | - | `0x07` | +0x2c | Online flag, 1 byte → `this+0x238`, logged as `m_bOnline` (not battery; KB.ini has `ShowPower=0`) |
 | `0x09` | `0x49` | +0x70 / +0x74 | LED RGB table |
 | `0x0a` | `0x4a` | +0x78 / +0x7c | On-board profile |
@@ -84,9 +84,12 @@ edits a few fields (`0x0048d810`) and writes it back.
 
 | Offset | Meaning |
 |---|---|
+| `0x01` | Debounce in milliseconds (0–8, as offered in the reference app) |
 | 9 | 1 when the selected mode is the per-key "self-define" mode |
 | 10 | Hardware effect id (table below) |
 | 11 | Colour group shown by the self-define mode (base + group) **unverified** |
+| `0x0f` | Win key Lock: `0` unlocked, `1` locked |
+| `0x1b` | OS mode: `0` Windows firmware mode (shown as Linux in the app), `1` Android, `2` Mac |
 | 0x38, 0x39 | Set to `0xff` |
 | 0x3a + 2·i | Brightness for effect slot *i* (0-9) |
 | 0x3b + 2·i | `(speed << 4) | colour` for slot *i* (speed 0-4) |
@@ -160,6 +163,10 @@ byte 8..   payload
 | Screen params | `0x0b` | `0x0b` |
 | GIF params | `0x0d` | - |
 | Reset | `0x11` | `0x06` |
+
+F75 Studio only offers factory reset on an online 2.4 GHz receiver. It checks
+that the same connection is still active and sends one reset report without
+waiting for an acknowledgement. The cable opcode above is not used by the app.
 
 ## Sleep
 
