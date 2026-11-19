@@ -121,6 +121,8 @@ Lighting, remaps and macros already written to the keyboard stay on it.
 
 ```
 f75-studio                      open the app (or bring up the running one)
+f75-studio help / --help        show help, even while the app is running
+f75-studio tray / --tray        start in the tray without opening a window
 f75-studio quit                 stop the copy running in the background or tray
 f75-studio doctor               guided hardware test, saves a report
 f75-studio probe                read only: connection and LED settings
@@ -133,7 +135,11 @@ f75-studio fix-permissions      install the udev rule
 ```
 
 Add `--dry-run` (and `--wired`) to print the packets instead of sending them.
-Commands other than `quit` refuse to run while the app is open.
+Hardware commands normally refuse to run while the app is open.
+
+For desktop autostart, run `f75-studio --tray` after your panel
+is ready. This requires a working system tray in your graphical session.
+Use the tray menu or run `f75-studio` to open the window.
 
 ## Status
 
