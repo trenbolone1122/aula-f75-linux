@@ -5,6 +5,7 @@ use crate::layout::{CANVAS, KEYS};
 use crate::macros;
 use crate::protocol::{self as p, Link, EFFECTS, LED_COUNT, PALETTE, RANDOM_COLOUR};
 use crate::state::{MacroDef, Profile};
+use crate::window_state::WindowAction;
 use crate::worker::{fx_by_name, macro_buffer, mode_index, sleep_label, Colours, Core, Event, Job, Live};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -349,6 +350,15 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        match self.core.window_frame(close_requested) {
+            WindowAction::None => {}
+            WindowAction::Focus => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+            WindowAction::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let before = *self.core.live.lock().unwrap();
         self.lv = before;
@@ -1259,14 +1269,10 @@ pub fn run() -> anyhow::Result<()> {
     let tray = crate::tray::spawn(core.clone());
     loop {
         window(core.clone())?;
-        // closed: stay in the background if there is a tray to come back from
-        // (or a live effect running - launching the app again reopens the window)
+        core.window_closed();
+        // Keep the worker alive if the tray or a live effect needs it.
         let background = tray || core.live.lock().unwrap().streaming();
-        if core.quit.load(Ordering::SeqCst) || !background {
-            break;
-        }
-        core.wait_show();
-        if core.quit.load(Ordering::SeqCst) {
+        if !background || !core.wait_for_window() {
             break;
         }
     }

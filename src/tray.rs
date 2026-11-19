@@ -29,9 +29,10 @@ impl ksni::Tray for Tray {
         self.icon.clone()
     }
     fn activate(&mut self, _x: i32, _y: i32) {
-        self.core.request_show();
+        self.core.request_toggle();
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
+        let visible = self.core.window_visible();
         let live = *self.core.live.lock().unwrap();
         let wired = self.core.wired();
         let usb = if wired { "" } else { " (USB-C only)" };
@@ -39,7 +40,21 @@ impl ksni::Tray for Tray {
         let active = Profile::active().name;
         let fx_sel = live.fx.and_then(|f| fx::STUDIO.iter().position(|x| x.0 == f)).map(|i| i + 1).unwrap_or(0);
         vec![
-            StandardItem { label: "Open F75 Studio".into(), activate: Box::new(|t: &mut Self| t.core.request_show()), ..Default::default() }.into(),
+            // Keep distinct D-Bus menu IDs so a cached click can't run the opposite action.
+            StandardItem {
+                label: "Open F75 Studio".into(),
+                visible: !visible,
+                activate: Box::new(|t: &mut Self| t.core.request_show()),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Hide F75 Studio".into(),
+                visible,
+                activate: Box::new(|t: &mut Self| t.core.request_hide()),
+                ..Default::default()
+            }
+            .into(),
             MenuItem::Separator,
             SubMenu {
                 label: "Profile".into(),
