@@ -19,6 +19,8 @@ use device::F75;
 use protocol::Link;
 
 const USAGE: &str = "f75-studio                         open the app
+f75-studio help | --help           show this help
+f75-studio tray | --tray           start in the system tray without a window
 f75-studio probe                   read only: link, online state, LED block
 f75-studio keymap [LAYER]          read only: dump key assignments (0 = base, 1 = Fn)
 f75-studio solid R G B             every key one colour (writes)
@@ -43,11 +45,24 @@ fn hue(h: f32) -> [u8; 3] {
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("help" | "--help") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Some("tray" | "--tray") => {
+            if args.len() != 1 {
+                bail!("Usage: f75-studio tray | --tray");
+            }
+            return ui::run(true);
+        }
+        _ => {}
+    }
     let dry = args.iter().any(|a| a == "--dry-run");
     let wired = args.iter().any(|a| a == "--wired");
     args.retain(|a| a != "--dry-run" && a != "--wired");
     if args.is_empty() {
-        return ui::run();
+        return ui::run(false);
     }
     if args[0] == "quit" {
         println!("{}", if instance::signal("quit") { "F75 Studio stopped" } else { "F75 Studio isn't running" });
