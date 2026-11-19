@@ -87,6 +87,7 @@ edits a few fields (`0x0048d810`) and writes it back.
 | 9 | 1 when the selected mode is the per-key "self-define" mode |
 | 10 | Hardware effect id (table below) |
 | 11 | Colour group shown by the self-define mode (base + group) **unverified** |
+| `0x12` (18) | Side light mode: `0` Off, `1` Fill, `2` Breathing, `3` Static. Preserve the rest of the block when writing. |
 | 0x38, 0x39 | Set to `0xff` |
 | 0x3a + 2·i | Brightness for effect slot *i* (0-9) |
 | 0x3b + 2·i | `(speed << 4) | colour` for slot *i* (speed 0-4) |
