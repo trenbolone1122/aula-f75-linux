@@ -6,9 +6,10 @@ use crate::fx::{self, Fx};
 use crate::macros;
 use crate::protocol::{self as p, Link, EFFECTS, LED_COUNT};
 use crate::state::{self, MacroDef, Profile};
+use crate::window_state::{WindowAction, WindowState};
 use eframe::egui;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -59,8 +60,8 @@ pub struct Core {
     pub ctx: Mutex<Option<egui::Context>>,
     pub profile_changed: AtomicBool,
     pub tray_refresh: Mutex<Option<Box<dyn Fn() + Send>>>,
-    show: (Mutex<bool>, Condvar),
-    pub quit: AtomicBool,
+    window: Mutex<WindowState>,
+    window_changed: Condvar,
 }
 
 impl Core {
@@ -89,8 +90,8 @@ impl Core {
             ctx: Mutex::new(None),
             profile_changed: AtomicBool::new(false),
             tray_refresh: Mutex::new(None),
-            show: (Mutex::new(false), Condvar::new()),
-            quit: AtomicBool::new(false),
+            window: Mutex::new(WindowState::default()),
+            window_changed: Condvar::new(),
         });
         let c = core.clone();
         std::thread::spawn(move || worker(jr, et, c));
@@ -117,29 +118,62 @@ impl Core {
         *self.link.lock().unwrap() == Some(Link::Wired)
     }
 
+    pub fn window_visible(&self) -> bool {
+        self.window.lock().unwrap().is_visible()
+    }
+
+    fn request_window_change(&self, change: impl FnOnce(&mut WindowState)) {
+        change(&mut self.window.lock().unwrap());
+        self.window_changed.notify_one();
+        self.repaint();
+    }
+
     pub fn request_show(&self) {
-        *self.show.0.lock().unwrap() = true;
-        self.show.1.notify_all();
-        if let Some(c) = self.ctx.lock().unwrap().as_ref() {
-            c.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
+        self.request_window_change(|window| window.set_visible(true));
+    }
+
+    pub fn request_hide(&self) {
+        self.request_window_change(|window| window.set_visible(false));
+    }
+
+    pub fn request_toggle(&self) {
+        self.request_window_change(WindowState::toggle);
     }
 
     pub fn request_quit(&self) {
-        self.quit.store(true, Ordering::SeqCst);
-        self.request_show();
-        if let Some(c) = self.ctx.lock().unwrap().as_ref() {
-            c.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        self.request_window_change(WindowState::quit);
     }
 
-    /// Blocks until the tray / a second launch asks for the window (or quit).
-    pub fn wait_show(&self) {
-        let mut g = self.show.0.lock().unwrap();
-        while !*g {
-            g = self.show.1.wait(g).unwrap();
+    pub fn window_frame(&self, close_requested: bool) -> WindowAction {
+        let (action, became_visible) = {
+            let mut window = self.window.lock().unwrap();
+            let was_visible = window.is_visible();
+            let action = window.frame(close_requested);
+            (action, !was_visible && window.is_visible())
+        };
+        if became_visible {
+            self.refresh_tray();
         }
-        *g = false;
+        action
+    }
+
+    pub fn window_closed(&self) {
+        self.window.lock().unwrap().closed();
+        self.refresh_tray();
+    }
+
+    /// Wait for an open request, or return false if the process should quit.
+    pub fn wait_for_window(&self) -> bool {
+        let mut window = self.window.lock().unwrap();
+        loop {
+            if window.is_quitting() {
+                return false;
+            }
+            if window.begin_open() {
+                return true;
+            }
+            window = self.window_changed.wait(window).unwrap();
+        }
     }
 
     /// Stops streaming and puts the profile's own lighting back.

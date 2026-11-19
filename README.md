@@ -114,8 +114,10 @@ Lighting, remaps and macros already written to the keyboard stay on it.
   at any time.
 * **Macros** (USB-C): text the keyboard types by itself, even without the app.
 * **Power:** sleep timeout, including Never.
-* **Background:** close the window and live effects keep running; the tray icon
-  has profiles, effects and Quit.
+* **Background:** use **Hide F75 Studio** / **Open F75 Studio** in the tray menu
+  to hide or show the window without stopping live effects. The tray icon's
+  primary click also toggles the window when supported by the desktop panel.
+  The menu also has profiles, effects and Quit.
 
 ## Command line
 

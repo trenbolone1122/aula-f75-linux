@@ -12,6 +12,7 @@ mod protocol;
 mod state;
 mod tray;
 mod ui;
+mod window_state;
 mod worker;
 
 use anyhow::{bail, Result};
